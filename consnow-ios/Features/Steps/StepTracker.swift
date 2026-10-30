@@ -170,12 +170,36 @@ final class StepTracker: ObservableObject {
             return
         }
         if syncState == .notAuthorized { syncState = .idle }
+
+        // Exact "last moved" from iOS's motion timeline (recorded even while we were asleep).
+        let movement = await source.lastMovement(from: dayStart, to: now)
+        if let movement {
+            isWalking = movement.isWalkingNow
+            if let moved = movement.lastMovedAt { recordStep(at: moved) }
+        }
+
         guard day == trackedDay, steps > todaySteps else { return }
 
         todaySteps = steps
-        if let estimate = await estimateLastStep(before: now, notBefore: dayStart) {
+        // Fallback when the motion timeline isn't available.
+        if movement?.lastMovedAt == nil,
+           let estimate = await estimateLastStep(before: now, notBefore: dayStart) {
             recordStep(at: estimate)
         }
+    }
+
+    /// Called when iOS wakes the app in the background (silent push / background refresh).
+    /// The UI may never have started tracking, so set up today's state and force a sync.
+    func syncFromWake() async {
+        guard TokenManager.shared.isLoggedIn, PedometerSource.isAvailable else { return }
+        let day = DateUtil.localDay()
+        if trackedDay != day {
+            trackedDay = day
+            todaySteps = 0
+            lastSent = nil
+        }
+        await refreshFromHistory()
+        await syncNow(force: true)
     }
 
     private func recordStep(at date: Date) {

@@ -7,6 +7,7 @@ import SwiftUI
 
 @main
 struct ConsnowApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var authVM = AuthViewModel()
 
     var body: some Scene {
@@ -40,7 +41,9 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active: activate()
-            case .background: StepTracker.shared.syncBeforeSuspend()
+            case .background:
+                StepTracker.shared.syncBeforeSuspend()
+                LockStateTracker.shared.appEnteredBackground()
             default: break
             }
         }
@@ -50,15 +53,21 @@ struct RootView: View {
             } else {
                 // Covers 401-triggered logouts too, not just the Log out button.
                 StepTracker.shared.stop(resetState: true)
+                LockStateTracker.shared.stop(resetState: true)
                 ConnectionsStore.shared.clear()
             }
         }
     }
 
     /// Equivalent of Android starting StepCounterService on launch / permission grant.
+    
     private func activate() {
         guard authVM.isLoggedIn else { return }
         StepTracker.shared.start()
-        Task { await TokenManager.shared.refreshIfNeeded() }
+        LockStateTracker.shared.appBecameActive()
+        Task {
+            await TokenManager.shared.refreshIfNeeded()
+            await AppDelegate.uploadPushToken()
+        }
     }
 }

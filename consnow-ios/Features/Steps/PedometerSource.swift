@@ -70,4 +70,38 @@ nonisolated final class PedometerSource: @unchecked Sendable {
     func stopActivityUpdates() {
         activityManager.stopActivityUpdates()
     }
+
+    /// Result of reading iOS's motion timeline.
+    struct Movement: Sendable {
+        /// The newest motion state is walking/running.
+        let isWalkingNow: Bool
+        /// When they last stopped walking/running (`end` if still walking). nil = no movement in the window.
+        let lastMovedAt: Date?
+    }
+
+    /// Reads the motion timeline iOS records in the background (even while the app is asleep
+    /// or the phone is locked) and finds the exact moment the person last moved.
+    /// Returns nil if activity data isn't available or permission is denied.
+    func lastMovement(from start: Date, to end: Date) async -> Movement? {
+        guard CMMotionActivityManager.isActivityAvailable(), end > start else { return nil }
+        let activities: [CMMotionActivity]? = await withCheckedContinuation { continuation in
+            activityManager.queryActivityStarting(from: start, to: end, to: activityQueue) { activities, error in
+                continuation.resume(returning: error == nil ? (activities ?? []) : nil)
+            }
+        }
+        guard let activities else { return nil }
+
+        // The list is a sequence of state changes; each lasts until the next one starts.
+        func isMoving(_ activity: CMMotionActivity) -> Bool {
+            (activity.walking || activity.running) && activity.confidence != .low
+        }
+        guard let index = activities.lastIndex(where: isMoving) else {
+            return Movement(isWalkingNow: false, lastMovedAt: nil)
+        }
+        if index == activities.count - 1 {
+            return Movement(isWalkingNow: true, lastMovedAt: end)
+        }
+        let stoppedAt = min(activities[index + 1].startDate, end)
+        return Movement(isWalkingNow: false, lastMovedAt: stoppedAt)
+    }
 }

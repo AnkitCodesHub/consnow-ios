@@ -12,4 +12,5 @@ extension Color {
     static let accent = Color(red: 0.18, green: 0.80, blue: 0.72)
     static let textPrimary = Color.white
     static let textSecondary = Color.white.opacity(0.6)
+    static let warning = Color(red: 0.96, green: 0.70, blue: 0.26)
 }

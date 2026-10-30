@@ -72,6 +72,21 @@ nonisolated struct ActivityResponse: Codable, Equatable {
     let unlockedAt: String?
     let isLocked: Bool
     let isOnline: Bool
+    /// When the server last heard from the phone (optional: older backends don't send it).
+    let lastSeenAt: String?
+}
+
+// MARK: - Activity reporting  (PUT /activity/unlock, /activity/lock, /activity/heartbeat)
+
+nonisolated struct ActivityEventRequest: Codable {
+    let occurredAt: Int64   // device epoch ms of the transition
+}
+
+// MARK: - Push  (POST /devices/apns-token)
+
+nonisolated struct ApnsTokenRequest: Codable {
+    let token: String
+    let environment: String  // "sandbox" | "production"
 }
 
 // MARK: - Connections  (GET /connections, POST /connections)

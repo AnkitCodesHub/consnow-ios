@@ -52,6 +52,18 @@ enum DateUtil {
         return relativeFormatter.localizedString(for: date, relativeTo: now)
     }
 
+    /// Compact style used on the friend screen, same as Android: "just now", "3m ago", "2h ago", "1d ago".
+    static func shortRelative(_ date: Date?, now: Date = Date()) -> String? {
+        guard let date else { return nil }
+        let seconds = Int(max(0, now.timeIntervalSince(date)))
+        switch seconds {
+        case ..<60: return "just now"
+        case ..<3600: return "\(seconds / 60)m ago"
+        case ..<86_400: return "\(seconds / 3600)h ago"
+        default: return "\(seconds / 86_400)d ago"
+        }
+    }
+
     static func epochMillis(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1000).rounded())
     }

@@ -27,7 +27,7 @@ struct PeerStatus {
         if notSharing { return "Not sharing steps" }
         if isWalking { return "Walking now" }
         guard let date = DateUtil.parseISO(snapshot?.steps?.lastActiveAt),
-              let relative = DateUtil.relative(date) else { return "Last moved: unknown" }
+              let relative = DateUtil.shortRelative(date) else { return "Last moved: unknown" }
         return "Last moved \(relative)"
     }
 
@@ -46,7 +46,7 @@ struct PeerStatus {
         switch lock {
         case .unlocked: return "Phone unlocked"
         case .locked: return "Phone locked"
-        case .offline: return "Offline"
+        case .offline: return "Last seen unlocked"
         case .unknown: return "Phone status not shared"
         }
     }
@@ -55,7 +55,7 @@ struct PeerStatus {
         switch lock {
         case .unlocked: return "lock.open.fill"
         case .locked: return "lock.fill"
-        case .offline: return "wifi.slash"
+        case .offline: return "lock.open"
         case .unknown: return "questionmark.circle"
         }
     }
@@ -66,8 +66,79 @@ struct PeerStatus {
 
     var lastUnlockedText: String? {
         guard let date = DateUtil.parseISO(snapshot?.activity?.unlockedAt),
-              let relative = DateUtil.relative(date) else { return nil }
+              let relative = DateUtil.shortRelative(date) else { return nil }
         return "Last unlocked \(relative)"
+    }
+
+    // MARK: - Friend screen lock block
+    //
+    //   Locked · Last unlocked 26m ago
+    //   ● updated 12 min ago
+    //
+    // iPhones can't stream lock events, so the screen also says how old the data is.
+
+    /// When we last heard from the friend's phone.
+    var lastSeenAt: Date? {
+        if let seen = DateUtil.parseISO(snapshot?.activity?.lastSeenAt) { return seen }
+        // Heartbeat within the last 3 min → as fresh as our last fetch.
+        if snapshot?.activity?.isOnline == true { return snapshot?.fetchedAt }
+        // Otherwise the newest thing the phone sent: a lock/unlock or a step sync.
+        return [
+            DateUtil.parseISO(snapshot?.activity?.unlockedAt),
+            DateUtil.parseISO(snapshot?.steps?.updatedAt),
+        ].compactMap { $0 }.max()
+    }
+
+    enum Freshness { case live, recent, stale }
+
+    func freshness(now: Date = Date()) -> Freshness {
+        if snapshot?.activity?.isOnline == true { return .live }
+        guard let seen = lastSeenAt else { return .stale }
+        switch now.timeIntervalSince(seen) {
+        case ..<120: return .live
+        case ..<1800: return .recent
+        default: return .stale
+        }
+    }
+
+    /// Lock drawn open for "unlocked" and for "last seen unlocked".
+    var showsUnlocked: Bool { lock == .unlocked || lock == .offline }
+
+    /// "Locked" / "Unlocked" / "Phone status not shared"
+    var lockHeadline: String {
+        switch lock {
+        case .locked: return "Locked"
+        case .unlocked, .offline: return "Unlocked"
+        case .unknown: return "Phone status not shared"
+        }
+    }
+
+    /// "Last unlocked 26m ago" (locked) or "Last seen unlocked 12m ago" (unlocked, not live).
+    func lockDetail(now: Date = Date()) -> String? {
+        switch lock {
+        case .locked:
+            guard let date = DateUtil.parseISO(snapshot?.activity?.unlockedAt),
+                  let relative = DateUtil.shortRelative(date, now: now) else { return nil }
+            return "Last unlocked \(relative)"
+        case .offline:
+            guard let relative = DateUtil.shortRelative(lastSeenAt, now: now) else { return nil }
+            return "Last seen unlocked \(relative)"
+        case .unlocked, .unknown:
+            return nil
+        }
+    }
+
+    /// "live" / "updated just now" / "updated 12 min ago"
+    func updatedText(now: Date = Date()) -> String? {
+        if snapshot?.activity?.isOnline == true { return "live" }
+        guard let seen = lastSeenAt else { return nil }
+        let minutes = Int(max(0, now.timeIntervalSince(seen)) / 60)
+        switch minutes {
+        case 0: return "updated just now"
+        case ..<60: return "updated \(minutes) min ago"
+        case ..<1440: return "updated \(minutes / 60) hr ago"
+        default: return "updated \(minutes / 1440)d ago"
+        }
     }
 
     static func distance(for steps: Int) -> String {
