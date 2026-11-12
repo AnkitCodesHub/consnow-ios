@@ -82,6 +82,15 @@ nonisolated struct ActivityEventRequest: Codable {
     let occurredAt: Int64   // device epoch ms of the transition
 }
 
+// MARK: - Profile views  (POST /profile-views/:ownerId, GET /profile-views?since=)
+
+/// One time a friend opened your profile.
+nonisolated struct ProfileViewResponse: Codable {
+    let viewerId: String?
+    let name: String
+    let viewedAt: String    // ISO time of that open
+}
+
 // MARK: - Push  (POST /devices/apns-token)
 
 nonisolated struct ApnsTokenRequest: Codable {

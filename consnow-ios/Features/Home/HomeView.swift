@@ -10,10 +10,17 @@ struct HomeView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @ObservedObject private var tracker = StepTracker.shared
     @ObservedObject private var store = ConnectionsStore.shared
+    @ObservedObject private var backgroundStatus = BackgroundStatusMonitor.shared
     @State private var selectedConnection: ConnectionDto?
     @State private var showAddConnection = false
     @State private var showSettings = false
     @State private var copied = false
+
+    // "Seen by" (hold the steps card)
+    @State private var watchers: [ProfileWatcher] = []   // friends who opened your profile today
+    @State private var cardPressed = false               // finger is down (any time)
+    @State private var watchersHeld = false              // finger is still down after the hold time
+    @State private var screenWidth: CGFloat = 0
 
     private var code: String { authVM.currentUser?.connectionCode ?? "------" }
 
@@ -29,7 +36,11 @@ struct HomeView: View {
                         motionPermissionBanner
                     }
 
-                    StepGaugeView(steps: tracker.todaySteps)
+                    if let problem = backgroundStatus.problem {
+                        BackgroundStatusBanner(problem: problem)
+                    }
+
+                    stepsCard
 
                     statusBadges
 
@@ -38,6 +49,15 @@ struct HomeView: View {
                     friendsSection
                 }
                 .padding(.vertical)
+                // Who opened my profile today: opens on the left while the card is held
+                .overlay(alignment: .topLeading) {
+                    if watchersHeld {
+                        WhosWatchingPopup(watchers: watchers, width: screenWidth / 2)
+                            .offset(x: 8, y: 34)
+                            .transition(WatchersMotion.popupTransition(width: screenWidth / 2))
+                            .allowsHitTesting(false)   // must not steal the held finger
+                    }
+                }
             }
             .refreshable {
                 await tracker.refreshFromHistory()
@@ -56,6 +76,11 @@ struct HomeView: View {
             SettingsView()
                 .environmentObject(authVM)
         }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            screenWidth = width
+        }
         // Refresh friends every 30s while Home is visible.
         .task {
             while !Task.isCancelled {
@@ -66,6 +91,40 @@ struct HomeView: View {
     }
 
     // MARK: - Sections
+
+    /// Today's steps. Hold it to see who viewed your profile today ("Seen by").
+    private var stepsCard: some View {
+        StepGaugeView(steps: tracker.todaySteps)
+            // Static eye: shows this card can be held to see who viewed you
+            .overlay(alignment: .bottomTrailing) {
+                WatchersHintBadge()
+                    .padding(14)
+            }
+            .overlay {
+                HoldGestureView(
+                    onPressChange: { cardPressed = $0 },
+                    onHold: { showWatchers() },
+                    onRelease: { hideWatchers() }
+                )
+            }
+            // Pops in while pressed, pops out while the list is showing (springy)
+            .scaleEffect(watchersCardScale(pressed: cardPressed, held: watchersHeld))
+            .animation(WatchersMotion.cardSpring, value: cardPressed)
+            .animation(WatchersMotion.cardSpring, value: watchersHeld)
+    }
+
+    private func showWatchers() {
+        WatchersMotion.holdHaptic()
+        withAnimation(WatchersMotion.enter) { watchersHeld = true }
+        // Ask for a fresh list each time the popup opens; keep the old one if it fails.
+        Task {
+            if let list = await WatchersAPI.fetchToday() { watchers = list }
+        }
+    }
+
+    private func hideWatchers() {
+        withAnimation(WatchersMotion.exit) { watchersHeld = false }
+    }
 
     private var header: some View {
         HStack {
@@ -324,6 +383,15 @@ struct AddConnectionView: View {
                 .opacity(code.count == 6 ? 1 : 0.5)
             }
             .padding(24)
+
+            // One-time notice (shows once for a few seconds, then never again)
+            VStack {
+                ViewsNotice()
+                    .allowsHitTesting(false)
+                    .padding(.top, 64)
+                    .padding(.horizontal, 24)
+                Spacer()
+            }
         }
     }
 

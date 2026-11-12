@@ -73,6 +73,10 @@ struct ConnectionDetailView: View {
                 .padding(.bottom, 32)
             }
         }
+        // Tell the server this friend's profile was opened ("Seen by"; it ignores repeats within 5 min)
+        .task(id: connection.peer.id) {
+            await WatchersAPI.recordView(of: connection.peer.id)
+        }
         // Auto-refresh every 15s while this screen is open (until WebSocket push is added).
         .task {
             while !Task.isCancelled {

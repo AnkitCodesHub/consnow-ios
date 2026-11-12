@@ -1,0 +1,5 @@
+{
+  "Simulator Target Bundle": "com.consnow.ios",
+  "aps": { "content-available": 1 },
+  "type": "status_request"
+}

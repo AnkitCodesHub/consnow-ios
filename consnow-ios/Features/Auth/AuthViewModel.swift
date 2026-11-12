@@ -59,7 +59,11 @@ final class AuthViewModel: ObservableObject {
         }
     }
 
-    func logout() {
+    /// Tells the server to stop waking this iPhone for this account, then signs out.
+    func logout() async {
+        isLoading = true
+        await AppDelegate.clearPushTokenOnServer()   // gives up after 5 s when offline
+        isLoading = false
         SessionCleanup.run()
     }
 
@@ -68,7 +72,8 @@ final class AuthViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         do {
-            try await APIClient.shared.sendRaw("DELETE", "auth/me")
+            try await APIClient.shared.sendRaw("DELETE", "auth/me")   // also drops the push token
+            UserDefaults.standard.removeObject(forKey: "apns_uploaded_token_user")
             SessionCleanup.run()
             return true
         } catch {

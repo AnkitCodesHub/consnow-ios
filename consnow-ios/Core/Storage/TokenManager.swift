@@ -8,6 +8,7 @@
 
 import Foundation
 import Combine
+import UIKit
 
 final class TokenManager: ObservableObject {
     static let shared = TokenManager()
@@ -22,22 +23,65 @@ final class TokenManager: ObservableObject {
     private let lastRefreshKey = "token_last_refresh"
     private let defaults = UserDefaults.standard
 
+    /// True while the session couldn't be read because the phone restarted and hasn't
+    /// been unlocked yet (iOS can wake the app for a push / refresh in that state).
+    /// The session is NOT gone: it's reloaded as soon as the phone is unlocked.
+    private(set) var waitingForFirstUnlock = false
+    private var unlockObserver: NSObjectProtocol?
+
     private init() {
+        loadSession()
+
+        // Reload the session the moment the phone is unlocked after a restart.
+        unlockObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadIfNeeded() }
+        }
+    }
+
+    /// Reads the session again if it couldn't be read at launch (before the first unlock).
+    func reloadIfNeeded() {
+        guard waitingForFirstUnlock else { return }
+        loadSession()
+    }
+
+    private func loadSession() {
+        switch KeychainStore.readResult(tokenKey) {
+        case .lockedUntilFirstUnlock:
+            // Don't touch anything: UserDefaults is unreadable too right now, and
+            // treating this as "logged out" would wipe a perfectly good session.
+            waitingForFirstUnlock = true
+            #if DEBUG
+            print("🔒 Session unreadable until the first unlock after restart")
+            #endif
+            return
+        case .value(let stored):
+            waitingForFirstUnlock = false
+            var storedUser: UserDto?
+            if let data = defaults.data(forKey: userKey) {
+                storedUser = try? JSONDecoder().decode(UserDto.self, from: data)
+            }
+            // Keychain survives app deletion; UserDefaults doesn't. A leftover token
+            // from a previous install without a profile is not a usable session.
+            if storedUser == nil {
+                KeychainStore.delete(tokenKey)
+                token = nil
+                user = nil
+                return
+            }
+            token = stored
+            user = storedUser
+        case .notFound, .failed:
+            waitingForFirstUnlock = false
+            token = nil
+            user = nil
+        }
+
         // The first Swift build stored the token in UserDefaults without the user's
         // connection code. Drop those keys; affected testers just sign in once more.
         for legacy in ["auth_token", "user_id", "user_name"] {
             defaults.removeObject(forKey: legacy)
-        }
-
-        token = KeychainStore.read(tokenKey)
-        if let data = defaults.data(forKey: userKey) {
-            user = try? JSONDecoder().decode(UserDto.self, from: data)
-        }
-        // Keychain survives app deletion; UserDefaults doesn't. A leftover token
-        // from a previous install without a profile is not a usable session.
-        if token != nil && user == nil {
-            KeychainStore.delete(tokenKey)
-            token = nil
         }
     }
 

@@ -12,14 +12,39 @@ import Security
 enum KeychainStore {
     private static let service = "com.consnow.ios"
 
+    enum ReadResult: Equatable {
+        case value(String)
+        case notFound
+        /// The phone restarted and hasn't been unlocked yet: the Keychain is still
+        /// encrypted. The value may well exist; try again after the first unlock.
+        case lockedUntilFirstUnlock
+        case failed(OSStatus)
+    }
+
     static func read(_ key: String) -> String? {
+        if case .value(let value) = readResult(key) { return value }
+        return nil
+    }
+
+    static func readResult(_ key: String) -> ReadResult {
         var query = baseQuery(key)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data, let value = String(data: data, encoding: .utf8) else {
+                return .failed(status)
+            }
+            return .value(value)
+        case errSecItemNotFound:
+            return .notFound
+        case errSecInteractionNotAllowed:
+            return .lockedUntilFirstUnlock
+        default:
+            return .failed(status)
+        }
     }
 
     static func save(_ value: String, for key: String) {

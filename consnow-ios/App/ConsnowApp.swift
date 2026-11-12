@@ -44,6 +44,7 @@ struct RootView: View {
             case .background:
                 StepTracker.shared.syncBeforeSuspend()
                 LockStateTracker.shared.appEnteredBackground()
+                AppDelegate.scheduleRefresh()   // keep a background refresh queued
             default: break
             }
         }
@@ -62,10 +63,12 @@ struct RootView: View {
     /// Equivalent of Android starting StepCounterService on launch / permission grant.
     
     private func activate() {
+        TokenManager.shared.reloadIfNeeded()   // session unreadable at a pre-unlock launch
         guard authVM.isLoggedIn else { return }
         StepTracker.shared.start()
         LockStateTracker.shared.appBecameActive()
         Task {
+            await AppDelegate.ensureNotificationPermission()   // without it iOS drops wake-up pushes
             await TokenManager.shared.refreshIfNeeded()
             await AppDelegate.uploadPushToken()
         }

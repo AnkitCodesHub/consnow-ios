@@ -23,9 +23,12 @@ struct SettingsView: View {
 
                 Section {
                     Button("Log out") {
-                        authVM.logout()
-                        dismiss()
+                        Task {
+                            await authVM.logout()
+                            dismiss()
+                        }
                     }
+                    .disabled(authVM.isLoading)
                 }
 
                 Section {

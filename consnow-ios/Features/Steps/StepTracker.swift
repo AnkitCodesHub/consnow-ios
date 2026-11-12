@@ -42,7 +42,10 @@ final class StepTracker: ObservableObject {
 
     private var trackedDay: String?
     private var isRunning = false
-    private var isSyncing = false
+    /// The sync currently running, if any (see syncNow).
+    private var inFlight: Task<Bool, Never>?
+    /// CoreMotion keeps 7 days of steps: back-fill at most 6 full days before today.
+    static let maxBackfillDays = 6
     private var syncLoop: Task<Void, Never>?
     private var dayObserver: NSObjectProtocol?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
@@ -109,11 +112,16 @@ final class StepTracker: ObservableObject {
 
     /// Call when the app goes to the background: one last sync before iOS suspends us.
     func syncBeforeSuspend() {
-        guard TokenManager.shared.isLoggedIn, backgroundTask == .invalid else { return }
-        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "StepSync") { [weak self] in
-            MainActor.assumeIsolated { self?.endBackgroundTask() }
+        guard TokenManager.shared.isLoggedIn else { return }
+        // Always sync, even if the previous background task (app closed a moment ago)
+        // is still open; only ask iOS for extra time once.
+        if backgroundTask == .invalid {
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "StepSync") { [weak self] in
+                MainActor.assumeIsolated { self?.endBackgroundTask() }
+            }
         }
         Task {
+            await refreshFromHistory()
             await syncNow(force: true)
             endBackgroundTask()
         }
@@ -190,8 +198,10 @@ final class StepTracker: ObservableObject {
 
     /// Called when iOS wakes the app in the background (silent push / background refresh).
     /// The UI may never have started tracking, so set up today's state and force a sync.
-    func syncFromWake() async {
-        guard TokenManager.shared.isLoggedIn, PedometerSource.isAvailable else { return }
+    /// Returns true when today's total reached the server.
+    @discardableResult
+    func syncFromWake() async -> Bool {
+        guard TokenManager.shared.isLoggedIn, PedometerSource.isAvailable else { return false }
         let day = DateUtil.localDay()
         if trackedDay != day {
             trackedDay = day
@@ -199,7 +209,7 @@ final class StepTracker: ObservableObject {
             lastSent = nil
         }
         await refreshFromHistory()
-        await syncNow(force: true)
+        return await syncNow(force: true)
     }
 
     private func recordStep(at date: Date) {
@@ -238,12 +248,35 @@ final class StepTracker: ObservableObject {
         }
     }
 
-    func syncNow(force: Bool = false) async {
-        guard TokenManager.shared.isLoggedIn, !isSyncing, let day = trackedDay else { return }
-        isSyncing = true
-        defer { isSyncing = false }
+    /// Sends today's total (PUT /steps/sync), then any unfinished earlier days.
+    ///
+    /// If a sync is already running, this waits for it. A forced sync (app going to the
+    /// background, a wake-up, pull to refresh) then runs once more with the newest numbers,
+    /// so it is never silently skipped. Returns true when the server has today's total.
+    @discardableResult
+    func syncNow(force: Bool = false) async -> Bool {
+        if let running = inFlight {
+            let sent = await running.value
+            guard force else { return sent }
+            return await syncNow(force: true)
+        }
+        let task = Task { @MainActor [weak self] () -> Bool in
+            guard let self else { return false }
+            let sent = await self.performSync(force: force)
+            self.inFlight = nil   // cleared before anyone waiting on it resumes
+            return sent
+        }
+        inFlight = task
+        // Cancelling the caller (e.g. the wake-up ran out of time) cancels the network call.
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
 
-        await finalizeYesterdayIfNeeded()
+    private func performSync(force: Bool) async -> Bool {
+        guard TokenManager.shared.isLoggedIn, let day = trackedDay else { return false }
 
         let now = Date()
         let steps = todaySteps
@@ -252,7 +285,10 @@ final class StepTracker: ObservableObject {
 
         if !force, let last = lastSent, last.day == day, last.steps == steps, last.walking == walking {
             // Nothing changed. While walking, re-send every ~50s so peers don't see us go stale.
-            if !walking || now.timeIntervalSince(last.at) < 50 { return }
+            if !walking || now.timeIntervalSince(last.at) < 50 {
+                await finalizeMissedDays()
+                return true   // the server already has exactly this
+            }
         }
 
         let dayStart = Calendar.current.startOfDay(for: now)
@@ -270,41 +306,87 @@ final class StepTracker: ObservableObject {
             syncState = .synced(now)
         } catch APIError.offline {
             syncState = .offline
+            return false
         } catch APIError.unauthorized {
             syncState = .idle
+            return false
         } catch {
-            syncState = .failed
+            if !Task.isCancelled { syncState = .failed }
             #if DEBUG
             print("StepSync failed: \(error)")
             #endif
+            return false
+        }
+
+        // Today first (it's what friends look at), then any days the app missed.
+        await finalizeMissedDays()
+        return true
+    }
+
+    /// Sends the final total of every day since the last finished one (B12).
+    ///
+    /// Without this, if the app didn't run for 2+ days, every day but "yesterday" stayed
+    /// stuck at whatever was synced last (steps walked later that day were never sent).
+    /// CoreMotion keeps 7 days, so we go back at most 6 full days. The server never
+    /// lowers a count, so re-sending is safe.
+    private func finalizeMissedDays() async {
+        let calendar = Calendar.current
+        let pending = Self.backfillDays(
+            lastDone: defaults.string(forKey: finalizedDayKey),
+            todayStart: calendar.startOfDay(for: Date()),
+            calendar: calendar
+        )
+
+        for start in pending {   // oldest first, so a failure leaves a clean resume point
+            guard !Task.isCancelled,
+                  let end = calendar.date(byAdding: .day, value: 1, to: start),
+                  let steps = await source.steps(from: start, to: end) else { return }
+            let key = DateUtil.localDay(start)
+            if steps > 0 {
+                let moved = await lastMoved(from: start, to: end)
+                do {
+                    try await APIClient.shared.sendRaw(
+                        "PUT", "steps/sync",
+                        body: SyncStepsRequest(
+                            stepCount: steps, date: key, isActive: false,
+                            lastStepAt: DateUtil.epochMillis(moved)
+                        )
+                    )
+                } catch {
+                    return   // offline / no time left: retry on the next sync
+                }
+            }
+            defaults.set(key, forKey: finalizedDayKey)
         }
     }
 
-    /// Once per day, send yesterday's final total (steps walked before midnight
-    /// that never got synced). The server never lowers a count, so this is safe.
-    private func finalizeYesterdayIfNeeded() async {
-        let calendar = Calendar.current
-        let todayStart = calendar.startOfDay(for: Date())
-        guard let yesterdayStart = calendar.date(byAdding: .day, value: -1, to: todayStart) else { return }
-        let yesterday = DateUtil.localDay(yesterdayStart)
-        guard defaults.string(forKey: finalizedDayKey) != yesterday else { return }
-        guard let steps = await source.steps(from: yesterdayStart, to: todayStart) else { return }
-
-        do {
-            if steps > 0 {
-                let lastStep = await estimateLastStep(before: todayStart, notBefore: yesterdayStart)
-                    ?? todayStart.addingTimeInterval(-1)
-                try await APIClient.shared.sendRaw(
-                    "PUT", "steps/sync",
-                    body: SyncStepsRequest(
-                        stepCount: steps, date: yesterday, isActive: false,
-                        lastStepAt: DateUtil.epochMillis(lastStep)
-                    )
-                )
-            }
-            defaults.set(yesterday, forKey: finalizedDayKey)
-        } catch {
-            // retry on the next sync
+    /// Which past days still need their final total, oldest first (as day starts).
+    ///  - lastDone nil (fresh install / new sign-in): only yesterday
+    ///  - otherwise every day after lastDone, at most `maxDays` back
+    ///  - lastDone today or later (clock moved back): nothing
+    static func backfillDays(
+        lastDone: String?, todayStart: Date, calendar: Calendar, maxDays: Int = maxBackfillDays
+    ) -> [Date] {
+        var pending: [Date] = []   // newest first
+        for back in stride(from: 1, through: maxDays, by: 1) {
+            guard let start = calendar.date(byAdding: .day, value: -back, to: todayStart) else { break }
+            let key = DateUtil.localDay(start)
+            if let lastDone, key <= lastDone { break }   // "yyyy-MM-dd" sorts by date
+            pending.append(start)
+            if lastDone == nil { break }
         }
+        return pending.reversed()
+    }
+
+    /// When the person last moved during a past day. Never later than the truth: the server
+    /// keeps the latest "last moved" it has ever seen, so overstating it would stick.
+    private func lastMoved(from start: Date, to end: Date) async -> Date {
+        if let moved = await source.lastMovement(from: start, to: end)?.lastMovedAt {
+            return min(moved, end.addingTimeInterval(-1))
+        }
+        if let estimate = await estimateLastStep(before: end, notBefore: start) {
+            return min(estimate, end.addingTimeInterval(-1))
+        }
+        return start   // unknown: the earliest possible time, so the server keeps what it had
     }
 }

@@ -127,6 +127,9 @@ final class LockStateTracker: ObservableObject {
         } else {
             isUnlocked = false
             await reportLocked()
+            // Lets friends see "Locked · updated just now" instead of an old timestamp.
+            // (Android keeps its heartbeat going while locked too.)
+            await sendHeartbeat()
         }
     }
 
@@ -191,9 +194,13 @@ final class LockStateTracker: ObservableObject {
                 return   // offline: try again on the next wake
             }
         }
+        await sendHeartbeat()
+    }
+
+    private func sendHeartbeat() async {
         do {
             try await APIClient.shared.sendRaw("PUT", "activity/heartbeat")
-            lastHeartbeatAt = now
+            lastHeartbeatAt = Date()
         } catch {}
     }
 

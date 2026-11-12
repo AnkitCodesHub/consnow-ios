@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import UIKit
 
 enum APIError: LocalizedError {
     case offline
@@ -33,6 +34,7 @@ final class APIClient {
     static let shared = APIClient()
 
     static let baseURL = URL(string: "https://consnow-backend-production.up.railway.app/")!
+    static let backgroundTimeout: TimeInterval = 10
 
     private let session: URLSession
     private let encoder = JSONEncoder()
@@ -57,9 +59,10 @@ final class APIClient {
         body: (any Encodable)? = nil,
         query: [URLQueryItem] = [],
         auth: Bool = true,
+        timeout: TimeInterval? = nil,
         as type: T.Type
     ) async throws -> T {
-        let data = try await sendRaw(method, path, body: body, query: query, auth: auth)
+        let data = try await sendRaw(method, path, body: body, query: query, auth: auth, timeout: timeout)
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
@@ -77,7 +80,8 @@ final class APIClient {
         _ path: String,
         body: (any Encodable)? = nil,
         query: [URLQueryItem] = [],
-        auth: Bool = true
+        auth: Bool = true,
+        timeout: TimeInterval? = nil
     ) async throws -> Data {
         guard var components = URLComponents(
             url: Self.baseURL.appendingPathComponent(path),
@@ -88,6 +92,12 @@ final class APIClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = method
+        // In the background iOS gives us ~30 s in total, so one slow call must not use it all.
+        if let timeout {
+            request.timeoutInterval = timeout
+        } else if UIApplication.shared.applicationState == .background {
+            request.timeoutInterval = Self.backgroundTimeout
+        }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
